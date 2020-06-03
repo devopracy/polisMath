@@ -1,11 +1,11 @@
-;; Copyright (C) 2012-present, Polis Technology Inc. This program is free software: you can redistribute it and/or  modify it under the terms of the GNU Affero General Public License, version 3, as published by the Free Software Foundation. This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public License for more details. You should have received a copy of the GNU Affero General Public License along with this program.  If not, see <http://www.gnu.org/licenses/>.
+;; Copyright (C) 2012-present, The Authors. This program is free software: you can redistribute it and/or  modify it under the terms of the GNU Affero General Public License, version 3, as published by the Free Software Foundation. This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public License for more details. You should have received a copy of the GNU Affero General Public License along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 (ns polismath.math.repness
   (:require [polismath.utils :as utils]
             [polismath.math.stats :as stats]
             [polismath.math.named-matrix :as nm]
             [polismath.math.clusters :as clusters]
-            [clojure.spec :as s]
+            [clojure.spec.alpha :as s]
             [clojure.core.matrix :as mat]
             [clojure.core.matrix.operators :refer :all]
             [clojure.tools.trace :as tr]
@@ -284,7 +284,7 @@
        nm/get-matrix
        mat/columns
        (map comment-stats)
-       (map #(assoc %2 :tid %1) (range))))
+       (map #(assoc %2 :tid %1) (nm/colnames data))))
 
 
 (defn select-consensus-comments

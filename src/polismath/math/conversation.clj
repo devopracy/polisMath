@@ -1,4 +1,4 @@
-;; Copyright (C) 2012-present, Polis Technology Inc. This program is free software: you can redistribute it and/or  modify it under the terms of the GNU Affero General Public License, version 3, as published by the Free Software Foundation. This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public License for more details. You should have received a copy of the GNU Affero General Public License along with this program.  If not, see <http://www.gnu.org/licenses/>.
+;; Copyright (C) 2012-present, The Authors. This program is free software: you can redistribute it and/or  modify it under the terms of the GNU Affero General Public License, version 3, as published by the Free Software Foundation. This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public License for more details. You should have received a copy of the GNU Affero General Public License along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 (ns polismath.math.conversation
   (:refer-clojure :exclude [* -  + == /])
@@ -9,7 +9,7 @@
     [polismath.math.repness :as repness]
     [polismath.math.named-matrix :as nm]
     [clojure.core.matrix :as matrix]
-    [clojure.spec :as s]
+    [clojure.spec.alpha :as s]
     [clojure.tools.reader.edn :as edn]
     [clojure.tools.trace :as tr]
     [clojure.math.numeric-tower :as math]
@@ -20,7 +20,7 @@
     [bigml.sampling.simple :as sampling]
     ;[alex-and-georges.debug-repl :as dbr]
     [taoensso.timbre :as log]
-    [clojure.spec.gen :as gen]
+    [clojure.spec.gen.alpha :as gen]
     [clojure.test.check.generators :as generators]))
 
 
@@ -69,13 +69,13 @@
   ;; Let's just use a generator that generates votes and places them in a rating mat?
   ;())
 
-(s/def ::unmodded-rating-mat ::rating-mat)
+(s/def ::raw-rating-mat ::rating-mat)
 
 ;; May want to speck out "bare" vs "fleshed out" conversations, as well as loaded vs raw, etc
 (s/def ::new-conversation
-  (s/keys :req-un [::unmodded-rating-mat ::last-vote-timestamp]))
+  (s/keys :req-un [::raw-rating-mat ::last-vote-timestamp]))
 (s/def ::full-conversation
-  (s/keys :req-un [::zid ::last-vote-timestamp ::group-votes ::unmodded-rating-mat ::rating-mat ::group-clusters ::subgroup-clusters ::repness ::subgroup-repness]))
+  (s/keys :req-un [::zid ::last-vote-timestamp ::group-votes ::raw-rating-mat ::rating-mat ::group-clusters ::subgroup-clusters ::repness ::subgroup-repness]))
 
 (s/def ::conversation
   (s/or :new ::new-conversation
@@ -84,7 +84,7 @@
 
 (defn new-conv []
   "Minimal structure upon which to perform conversation updates"
-  {:unmodded-rating-mat (nm/named-matrix)
+  {:raw-rating-mat (nm/named-matrix)
    :last-vote-timestamp 0
    :lastVoteTimestamp 0
    :rating-mat (nm/named-matrix)})
@@ -143,8 +143,8 @@
                           :max-k 5
                           :group-iters 10
                           ;; These three in particular we should be able to tune quickly
-                          :max-ptpts 80000
-                          :max-cmts 800
+                          :max-ptpts 100000
+                          :max-cmts 1500
                           :group-k-buffer 4}
                     opts))
 
@@ -186,18 +186,20 @@
    (plmb/fnk [customs]
      (:votes customs))
 
-   :unmodded-rating-mat
+   :raw-rating-mat
    (plmb/fnk [conv keep-votes]
      (nm/update-nmat
-       (:unmodded-rating-mat conv)
+       (:raw-rating-mat conv)
        (map (fn [v] (vector (:pid v) (:tid v) (:vote v))) keep-votes)))
 
    :rating-mat
-   (plmb/fnk [conv unmodded-rating-mat]
+   (plmb/fnk [conv raw-rating-mat]
      ;; This if-let here is just a simple performance optimization
-     (if-let [mod-out (:mod-out conv)]
-       (nm/zero-out-columns unmodded-rating-mat mod-out)
-       unmodded-rating-mat))
+     (let [mat
+           (if-let [mod-out (:mod-out conv)]
+             (nm/zero-out-columns raw-rating-mat mod-out)
+             raw-rating-mat)]
+       mat))
 
    :tids
    (plmb/fnk [conv rating-mat]
@@ -210,21 +212,28 @@
                   (count (nm/colnames rating-mat)))
 
    :user-vote-counts
-                (plmb/fnk [rating-mat]
+                (plmb/fnk [raw-rating-mat]
                   ; For deciding in-conv below; filter ptpts based on how much they've voted
                   (->> (mapv
-                         (fn [rowname row] [rowname (count (remove nil? row))])
-                         (nm/rownames rating-mat)
-                         (nm/get-matrix rating-mat))
+                         (fn [rowname row]
+                           [rowname (count (remove nil? row))])
+                         (nm/rownames raw-rating-mat)
+                         (nm/get-matrix raw-rating-mat))
                        (into {})))
 
    ;; Ugg... right, have to clarify that we don't want to drop this; are we leaving anything else out like this?
    :mod-out
    (plmb/fnk [conv]
      (:mod-out conv))
+   :mod-in
+   (plmb/fnk [conv]
+     (:mod-in conv))
+   :meta-tids
+   (plmb/fnk [conv]
+     (:meta-tids conv))
 
    ;; There should really be a nice way for us to specify that we want a full recompute on everything except in-conv,
-   ;; since in general we don't want to loose people in that process.
+   ;; since in meta-tids we don't want to loose people in that process.
    :in-conv     (plmb/fnk [conv user-vote-counts n-cmts]
                   ; This keeps track of which ptpts are in the conversation (to be considered
                   ; for base-clustering) based on home many votes they have. Once a ptpt is in,
@@ -264,7 +273,7 @@
        (int (/ (count (nm/rownames data)) 12)))))
 
 (defn group-votes
-  "Returns a map of group-clusters ids to {:A :D :S} maps."
+  "Returns a map of group-clusters ids to {:votes {<tid> {:A _ :D _ :S _}}} :n maps."
   [group-clusters base-clusters votes-base]
   (let [bid-to-index (zipmap (map :id base-clusters)
                              (range))]
@@ -292,24 +301,85 @@
                        (keys votes-base))}]))
         group-clusters))))
 
+
+(defn importance-metric
+  [A P S E]
+  (let [p (/ (+ P 1) (+ S 2))
+        a (/ (+ A 1) (+ S 2))]
+    (* (- 1 p) (+ E 1) a)))
+
+;; This could be
+;; TODO TUNE
+(def meta-priority 7)
+
+(defn priority-metric
+  [is-meta A P S E]
+  ;; We square to deepen our bias
+  (matrix/pow
+    (if is-meta
+      meta-priority
+        (* (importance-metric A P S E)
+           ;; scale by a factor which lets new comments bubble up
+           (+ 1 (* 8 (matrix/pow 2 (/ S -5))))))
+    2))
+
+
+(comment
+  ;; testing values
+  (float (importance-metric 1 0 1 0))
+  (priority-metric false 1 0 1 0)
+  (priority-metric false 20 3 20 0)
+  (priority-metric false 18 3 20 1)
+  :end-comment)
+
+(defn with-proj-and-extremtiy
+  "Compute projection and extremity and merge in to pca results"
+  [pca]
+  (let [cmnt-proj (pca/pca-project-cmnts pca)
+        cmnt-extremity
+        (mapv
+          (fn [row]
+            (matrix/length row))
+          (matrix/rows cmnt-proj))]
+    (assoc pca
+           :comment-projection (matrix/transpose cmnt-proj)
+           :comment-extremity cmnt-extremity)))
+  
 (def small-conv-update-graph
   "For computing small conversation updates (those without need for base clustering)"
   (merge
      base-conv-update-graph
      {:mat (plmb/fnk [rating-mat]
-             ; swap nils for zeros - most things need the 0s, but repness needs the nils
-             (mapv (fn [row] (map #(if (nil? %) 0 %) row))
-               (nm/get-matrix rating-mat)))
-
+             ; swap nils for per column average - most things need the 0s, but repness needs the nils
+             (let [mat (nm/get-matrix rating-mat)
+                   ;; TODO column-averages should be a separate build task
+                   ;; Can toggle here for nil? or (nil or = 0)
+                   ;replace? #(or (nil? %) (= 0 %))
+                   replace? nil?
+                   column-averages
+                   (mapv
+                     (fn [col]
+                       (let [col (remove replace? col)]
+                         (double
+                           (/ (reduce + col)
+                              (count col)))))
+                     (matrix/columns mat))]
+               (mapv
+                 (fn [row]
+                   (mapv
+                     (fn [i x]
+                       (if (replace? x) (get column-averages i) x))
+                     (range)
+                     row))
+                 mat)))
       :pca (plmb/fnk [conv mat opts']
              (let [pca
                    (pca/wrapped-pca mat
                                     (:n-comps opts')
                                     :start-vectors (get-in conv [:pca :comps])
                                     :iters (:pca-iters opts'))]
-               (assoc pca
-                      :comment-projection
-                      (matrix/transpose (pca/pca-project-cmnts pca)))))
+               (with-proj-and-extremtiy pca)))
+
 
       :proj
       (plmb/fnk [rating-mat pca]
@@ -331,7 +401,7 @@
             (clusters/kmeans in-conv-mat
               (:base-k opts')
               :last-clusters (:base-clusters conv)
-              :cluster-iters (:base-iters opts')))))
+              :max-iters (:base-iters opts')))))
 
       :base-clusters-proj
       (plmb/fnk [base-clusters]
@@ -478,8 +548,8 @@
       ;; This is a little different from the group version above;
       ;; For each group, we take the subgroup clustering the best silhouette, and keep it.
       ;; To each of the clusters in this clustering, we assoc the :parent-id of that cluster.
-      ;; We end up with a map that looks like {:parent-id clusters}, where clusters looks as it does for `:group-clusters`,
-      ;; excepting the each cluster has a `:parent-id` attr.
+      ;; We end up with a map that looks like {<parent-id> clusters}, where clusters looks as it does for `:group-clusters`,
+      ;; excepting the each cluster has a `:parent-id <parent-id>` attr/value pair.
       :subgroup-clusters
       (plmb/fnk [subgroup-clusterings subgroup-k-smoother]
         (into
@@ -507,14 +577,14 @@
       ;;           :disagree [3 0 0 1 0 23 0 ]}
       ;; where the indices in the arrays correspond NOT directly to the bid, but to the index of the
       ;; corresponding bid in a hypothetically sorted list of the base cluster ids
-      :votes-base (plmb/fnk [bid-to-pid rating-mat]
-                    (->> rating-mat
+      :votes-base (plmb/fnk [bid-to-pid raw-rating-mat]
+                    (->> raw-rating-mat
                       nm/colnames
                       (plmb/map-from-keys
                         (fn [tid]
-                          {:A (agg-bucket-votes-for-tid bid-to-pid rating-mat utils/agree? tid)
-                           :D (agg-bucket-votes-for-tid bid-to-pid rating-mat utils/disagree? tid)
-                           :S (agg-bucket-votes-for-tid bid-to-pid rating-mat number? tid)}))))
+                          {:A (agg-bucket-votes-for-tid bid-to-pid raw-rating-mat utils/agree? tid)
+                           :D (agg-bucket-votes-for-tid bid-to-pid raw-rating-mat utils/disagree? tid)
+                           :S (agg-bucket-votes-for-tid bid-to-pid raw-rating-mat number? tid)}))))
 
 
       ;; In most or all of the below, we need to do things for both groups and subgroups. However, the logic for these
@@ -525,11 +595,11 @@
       ;; downstream processing and data consumption. Will hvae to strike a balance here... For now, again, things are a
       ;; little verbose, but you can hopefully see some of the patters emerging for where these things may generalize.
 
-      ; {tid {gid {A _ D _ S}}}
+      ; {gid {:votes {<tid> {A _ D _ S}}}}
       :group-votes
       (plmb/fnk [group-clusters base-clusters votes-base]
         (group-votes group-clusters base-clusters votes-base))
-      ; {gid {tid {gid {A _ D _ S}}}}
+      ;; ?
       :subgroup-votes
       (plmb/fnk [subgroup-clusters base-clusters votes-base]
         (->> subgroup-clusters
@@ -538,6 +608,62 @@
                  (group-votes subgroup-clusters' base-clusters votes-base)))))
 
 
+      ; {tid consensus}
+      :group-aware-consensus
+           (plmb/fnk [group-votes]
+             (let [tid-gid-probs
+                   (reduce
+                     (fn [result [gid gid-stats]]
+                       (reduce
+                         (fn [result [tid {:keys [A S] :or {A 0 S 0}}]]
+                           (let [prob (/ (+ A 1.0) (+ S 2.0))]
+                             (assoc-in result [tid gid] prob)))
+                         result
+                         (:votes gid-stats)))
+                       ;; +1 acts as a dumb prior
+                     {}
+                     group-votes)
+                   tid-consensus
+                   (plmb/map-vals
+                     (fn [tid-stats]
+                       (->> tid-stats
+                            (map second)
+                            (reduce *)))
+                     tid-gid-probs)]
+               tid-consensus))
+
+      :comment-priorities
+      (plmb/fnk [conv group-votes pca tids meta-tids]
+        (let [group-votes (:group-votes conv)
+              extremities (into {} (map vector tids (:comment-extremity pca)))]
+          (plmb/map-from-keys
+            (fn [tid]
+              (let [{:as total-votes :keys [A D S P]}
+                    ;; reduce over votes per group, already aggregated
+                    (reduce
+                      (fn [votes [gid data]]
+                        ;; not sure why we have to do the or here? how would this ever come up nil? small
+                        ;; convs?
+                        (let [{:as data :keys [A S D] :or {A 0 S 0 D 0}} (get-in data [:votes tid])
+                              data (assoc data :P (+ (- S (+ A D))))]
+                          ;; Add in each of the data's kv count pairs
+                          (reduce
+                            (fn [votes' [k v]]
+                              (update votes' k + v))
+                            votes
+                            data)))
+                      {:A 0 :D 0 :S 0 :P 0}
+                      group-votes)
+                    extremity (or (get extremities tid)
+                                  (do
+                                    (log/warn "No extremity for tid" tid "zid" (:zid conv))
+                                    ;; Default to 0 just in case, but this shouldn't happen (bugfix)
+                                    0))]
+                (priority-metric (meta-tids tid) A P S extremity)))
+            tids)))
+
+
+      ;; ATTENTION! The following uses of :mod-out should be ideally taking into account strict/vs non-strict
       :repness
       (plmb/fnk [conv rating-mat group-clusters base-clusters]
         (-> (repness/conv-repness rating-mat group-clusters base-clusters)
@@ -617,12 +743,15 @@
                 (let [rand-indices (take sample-size (sampling/sample (range n-ptpts) :generator :twister))
                       pca          ((partial-pca mat pca rand-indices) pca)]
                   (if (= iter 0)
-                    (recur pca (dec iter))
-                    pca)))))}))
+                    ;; Then done, but don't forget to merge in the comment extremtiy, etc
+                    (with-proj-and-extremtiy pca)
+                    ;; Recur
+                    (recur pca (dec iter)))))))}))
 
 
 (def eager-profiled-compiler
-  (comp graph/eager-compile (partial graph/profiled :profile-data)))
+  ;(comp graph/eager-compile (partial graph/profiled :profile-data))
+  (comp graph/par-compile (partial graph/profiled :profile-data)))
 
 (def small-conv-update (eager-profiled-compiler small-conv-update-graph))
 (def large-conv-update (eager-profiled-compiler large-conv-update-graph))
@@ -635,13 +764,14 @@
    (conv-update conv votes {}))
   ;; TODO Need to pass through these options from all the various places where we call this function...
   ;; XXX Also need to set the max globally and by conversation for plan throttling
-  ([conv votes {:keys [med-cutoff large-cutoff]
-                :or {med-cutoff 100 large-cutoff 10000}
+  ([conv votes {:keys [large-cutoff]
+                :or {large-cutoff 10000}
                 :as opts}]
    (let [zid     (or (:zid conv) (:zid (first votes)))
-         ptpts   (nm/rownames (:unmodded-rating-mat conv))
+         ptpts   (nm/rownames (:raw-rating-mat conv))
+         cmnts   (nm/colnames (:raw-rating-mat conv))
          n-ptpts (count (distinct (into ptpts (map :pid votes))))
-         n-cmts  (count (distinct (into (nm/rownames (:unmodded-rating-mat conv)) (map :tid votes))))]
+         n-cmts  (count (distinct (into cmnts (map :tid votes))))]
      ;; This is a safety measure so we can call conv-update on an empty conversation after adding mod-out
      ;; Note though that as long as we have a non-empty conv, updating with empty/nil votes should still trigger recompute
      (if (and (= 0 n-ptpts n-cmts)
@@ -664,7 +794,7 @@
 
 (defn conv-shape
   [conv]
-  (matrix/shape (:unmodded-rating-mat conv)))
+  (matrix/shape (:raw-rating-mat conv)))
 
 (defn not-smaller?
   [conv1 conv2]
@@ -689,6 +819,8 @@
   "Take a conversation record and a seq of moderation data and updates the conversation's mod-out attr"
   [conv mods]
   (try
+    ;; We use reduce here instead of a (->> % filter into) because we need to make sure that we are
+    ;; processing things in order for mod in then out vs out then in
     (let [mod-out
           (reduce
             (fn [mod-out {:keys [tid is_meta mod]}]
@@ -696,9 +828,27 @@
                 (conj mod-out tid)
                 (disj mod-out tid)))
             (set (:mod-out conv))
+            mods)
+          mod-in
+          (reduce
+            (fn [mod-in {:keys [tid is_meta mod]}]
+              (if (or is_meta (= mod 1))
+                (conj mod-in tid)
+                (disj mod-in tid)))
+            (set (:mod-in conv))
+            mods)
+          meta-tids
+          (reduce
+            (fn [meta-tids {:keys [tid is_meta]}]
+              (if is_meta
+                (conj meta-tids tid)
+                (disj meta-tids tid)))
+            (set (:meta-tids conv))
             mods)]
       (-> conv
-          (assoc :mod-out mod-out)
+          (assoc :mod-out mod-out
+                 :mod-in mod-in
+                 :meta-tids meta-tids)
           (update :last-mod-timestamp #(apply max (or % 0) (map :modified mods)))))
     (catch Exception e
       (log/error "Problem running mod-update with mod-out:" (:mod-out conv) "and mods:" mods ":" e)
@@ -729,14 +879,22 @@
   (ipv-print-method o w))
 
 
+(defn misc-reader [type]
+ (fn [& args]
+   {:type type
+    :args args}))
+
 ; a reader that uses these custom printing formats
 (defn read-vectorz-edn [text]
   (edn/read-string
     {:readers {'mikera.vectorz.Vector matrix/matrix
                'mikera.arrayz.NDArray matrix/matrix
                'mikera.matrixx.Matrix matrix/matrix
-               'polismath.named-matrix.NamedMatrix nm/named-matrix-reader}}
+               'polismath.named-matrix.NamedMatrix nm/named-matrix-reader
+               'object (misc-reader :object)
+               'error (misc-reader :error)}}
     text))
+
 
 
 (defn conv-update-dump

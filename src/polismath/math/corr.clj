@@ -1,4 +1,4 @@
-;; Copyright (C) 2012-present, Polis Technology Inc. This program is free software: you can redistribute it and/or  modify it under the terms of the GNU Affero General Public License, version 3, as published by the Free Software Foundation. This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public License for more details. You should have received a copy of the GNU Affero General Public License along with this program.  If not, see <http://www.gnu.org/licenses/>.
+;; Copyright (C) 2012-present, The Authors. This program is free software: you can redistribute it and/or  modify it under the terms of the GNU Affero General Public License, version 3, as published by the Free Software Foundation. This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public License for more details. You should have received a copy of the GNU Affero General Public License along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 (ns polismath.math.corr
   (:refer-clojure :exclude [* - + == /])
@@ -12,7 +12,7 @@
     ;[polismath.utils :as utils]
     ;[polismath.math.stats :as stats]
     [polismath.math.named-matrix :as nm]
-    [clojure.spec :as s]
+    [clojure.spec.alpha :as s]
     [clojure.core.matrix :as matrix]
     ;[clojure.core.matrix.stats :as matrix-stats]
     [clojure.core.matrix.selection :as matrix.selection]
@@ -146,6 +146,21 @@
           (update :center (partial into []))))
     clusters))
 
+
+(defn default-tids
+  ;; Gonna need to get all of this under group clusters vs subgroups
+  [{:as conv :keys [repness consensus group-clusters rating-mat pca]}]
+  (let [{:keys [extremity]} pca
+        {:keys [agree disagree]} consensus]
+    (set
+      (concat
+        (map :tid (concat agree disagree))
+        (mapcat
+          (fn [[gid gid-repness]]
+            (map :tid gid-repness))
+          repness)))))
+
+
 (defn compute-corr
   ([conv tids]
    (let [matrix (:rating-mat conv)
@@ -161,7 +176,7 @@
                                          matrix/rows))]
      corr-mat'))
   ([conv]
-   (compute-corr conv nil)))
+   (compute-corr conv (default-tids conv))))
 
 
 (defn spit-json

@@ -1,16 +1,26 @@
-;; Copyright (C) 2012-present, Polis Technology Inc. This program is free software: you can redistribute it and/or  modify it under the terms of the GNU Affero General Public License, version 3, as published by the Free Software Foundation. This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public License for more details. You should have received a copy of the GNU Affero General Public License along with this program.  If not, see <http://www.gnu.org/licenses/>.
+;; Copyright (C) 2012-present, The Authors. This program is free software: you can redistribute it and/or  modify it under the terms of the GNU Affero General Public License, version 3, as published by the Free Software Foundation. This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public License for more details. You should have received a copy of the GNU Affero General Public License along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 (ns polismath.runner
   "This namespace is responsible for running systems"
+  (:refer-clojure :exclude [run!])
   (:require [polismath.system :as system]
-            ;[polismath.stormspec :as stormspec :refer [storm-system]]
+    ;[polismath.stormspec :as stormspec :refer [storm-system]]
             [polismath.utils :as utils]
-            ;; TODO Replace this with the canonical clojure.tools.cli once storm is removed
-            [clojure.newtools.cli :as cli]
+    ;; TODO Replace this with the canonical clojure.tools.cli once storm is removed
+            [clojure.tools.cli :as cli]
             [clojure.tools.namespace.repl :as namespace.repl]
             [taoensso.timbre :as log]
             [clojure.string :as string]
-            [com.stuartsierra.component :as component]))
+            [clj-time.core :as t]
+            [clojure.edn :as edn]
+            [clj-time.coerce :as co]
+            [clojure.java.io :as io]
+            [com.stuartsierra.component :as component]
+            [polismath.darwin.export :as export]
+            [polismath.conv-man :as conv-man]
+            [polismath.math.conversation :as conv]
+            [polismath.components.postgres :as postgres])
+  (:import [java.util.zip ZipOutputStream ZipEntry]))
 
 
 (defonce system nil)
@@ -42,7 +52,6 @@
   ([system-map-generator]
    (run! system-map-generator {})))
 
-;(defonce -runner! nil)
 (defn -runner! [] (run! (system/base-system {})))
 
 (defn system-reset!
@@ -56,10 +65,13 @@
 (def subcommands
   {;"storm" stormspec/storm-system ;; remove...
    ;"onyx" system/onyx-system ;; soon...
+   "update-all" system/base-system
+   "update" system/base-system
    "poller" system/poller-system
    "tasks" system/task-system
    "full" system/full-system
-   "simulator" system/simulator-system})
+   "simulator" system/simulator-system
+   "export" system/export-system})
 
 ;; TODO Build nice cli settings forking on subcommand, and tie in sanely with options comp
 
@@ -67,11 +79,11 @@
 
 (def cli-options
   "Has the same options as simulation if simulations are run"
-  [["-r" "--recompute"]])
+  [["-r" "--recompute" "Recompute conversations from scratch instead of starting from most recent values"]
+   ["-h" "--help" "Print help and exit"]])
 
 (defn usage [options-summary]
-  (->> ["Polismath stormspec"
-        "Usage: lein run [subcommand] [options]"
+  (->> ["Usage: lein run [subcommand] [options]"
         ""
         (str "Subcommand options: " (string/join " " (keys subcommands)))
 
@@ -80,60 +92,113 @@
         options-summary]
    (string/join \newline)))
 
-;;; This needs to be cleaned up and integrated somehow; Different mode though, not sure exactly how to..
-;
-;(defn parse-date
-;  [s]
-;  (->> (clojure.string/split s #"\s+")
-;       (map #(Integer/parseInt %))
-;       (apply t/date-time)
-;       co/to-long))
-;
-;
-;(def export-cli-options
-;  [["-z" "--zid ZID"           "ZID on which to do an export" :parse-fn #(Integer/parseInt %)]
-;   ["-Z" "--zinvite ZINVITE"   "ZINVITE code on which to perform an export"]
-;   ["-u" "--user-id USER_ID"   "Export all conversations associated with USER_ID, and place in zip file" :parse-fn #(Integer/parseInt %)]
-;   ["-a" "--at-date AT_DATE"   "A string of YYYY MM DD HH MM SS (in UTC)" :parse-fn parse-date]
-;   ["-f" "--format FORMAT"     "Either csv, excel or (soon) json" :parse-fn keyword :validate [#{:csv :excel} "Must be either csv or excel"]]
-;   ["-h" "--help"              "Print help and exit"]])
-;
-;(defn error-msg [errors]
-;  (str "The following errors occurred while parsing your command:\n\n"
-;       (clojure.string/join \newline errors)))
-;
-;(defn help-msg [options]
-;  (str "Export a conversation or set of conversations according to the options below:\n\n"
-;       \tab
-;       "filename" \tab "Filename (or file basename, in case of zip output, implicit or explicit" \newline
-;       (clojure.string/join \newline
-;                            (for [opt cli-options]
-;                              (apply str (interleave (repeat \tab) (take 3 opt)))))))
 
-;(defn export-main
-;  [arguments options]
-;  (let [filename (first arguments)
-;        options (assoc options :env-overrides {:math-env "prod"} :filename filename)]
-;    (if-let [uid (:user-id options)]
-;      ;; maybe here check if filename ends in zip and add if not; safest, and easiest... XXX
-;      (with-open [file (io/output-stream filename)
-;                  zip  (ZipOutputStream. file)]
-;        (doseq [zid (export/get-zids-for-uid darwin uid)]
-;          (let [zinvite (get-zinvite-from-zid darwin zid)
-;                ext (case (:format options) :excel "xls" :csv "csv")]
-;            (println "Now working on conv:" zid zinvite)
-;            (export-conversation darwin
-;                                 (assoc options
-;                                   :zid zid
-;                                   :zip-stream zip
-;                                   :entry-point (str (zipfile-basename filename) "/" zinvite "." ext))))))
-;      (export-conversation darwin options))
-;    (exit 0 "Export complete")))
+
+(defn update-conv
+  [conv-man zid]
+  (try
+    (let [conv (conv-man/load-or-init conv-man zid)
+          updated-conv (conv/conv-update conv [])
+          math-tick (postgres/inc-math-tick (:postgres conv-man) zid)]
+      (conv-man/write-conv-updates! conv-man updated-conv math-tick))
+    (catch Exception e (log/error e (str "Unable to complete conversation update for zid " zid)))))
+
+
+(defn update-all-convs
+  [{:as system :keys [conversation-manager postgres]}]
+  (->>
+    (postgres/ptpt-counts postgres)
+    (map :ptpt_cnt)
+    (pmap (partial update-conv conversation-manager))
+    (doall)))
+
+
+
+;; This needs to be cleaned up and integrated somehow; Different mode though, not sure exactly how to..
+;
+(defn parse-time
+  [s]
+  (->> (clojure.string/split s #"-")
+       (map #(Integer/parseInt %))
+       (apply t/date-time)
+       co/to-long))
+
+(defn parse-times
+  [s]
+  (->> (clojure.string/split s #":")
+       (map parse-time)))
+
+
+(def export-cli-options
+  [["-z" "--zid ZID"           "ZID on which to do an export" :parse-fn #(Integer/parseInt %)]
+   ["-Z" "--zinvite ZINVITE"   "ZINVITE code on which to perform an export"]
+   ["-X" "--include-xid"      "Include user xids in output"]
+   ["-u" "--user-id USER_ID"   "Export all conversations associated with USER_ID, and place in zip file" :parse-fn #(Integer/parseInt %)]
+   ["-f" "--filename FILENAME" "filename" "Name of output file (should be zip for csv out)"]
+   ["-t" "--at-time AT_TIME"   "A string of YYYY-MM-DD-HH-MM-SS (in UTC)" :parse-fn parse-time]
+   ["-T" "--at-times AT_TIMES" "A vector of strings of --at-time format" :parse-fn parse-times]
+   ["-F" "--format FORMAT"     "Either csv, excel or (soon) json" :parse-fn keyword :validate [#{:csv :excel} "Must be either csv or excel"] :default :csv]
+   ["-h" "--help"              "Print help and exit"]])
+
+(defn error-msg [errors]
+  (str "The following errors occurred while parsing your command:\n\n"
+       (clojure.string/join \newline errors)))
+
+(defn help-msg [options]
+  (str "Export a conversation or set of conversations according to the options below:\n\n"
+       \tab
+       "filename" \tab "Filename (or file basename, in case of zip output, implicit or explicit" \newline
+       (clojure.string/join \newline
+                            (for [opt cli-options]
+                              (apply str (interleave (repeat \tab) (take 3 opt)))))))
+
+(defn run-export
+  [system {:as options
+           :keys [filename user-id at-times]
+           :or {filename (str "export." (System/currentTimeMillis) ".zip")}}]
+  (let [darwin (:darwin system)]
+    (log/info "config" (-> system :config :math-env))
+    (log/info "config" (-> system :config :export))
+    (cond
+      ;; In this case, build all exports for this particular user
+      user-id
+      ;; maybe here check if filename ends in zip and add if not; safest, and easiest... XXX
+      (with-open [file (io/output-stream filename)
+                  zip  (ZipOutputStream. file)
+                  writer (io/writer zip)]
+        (doseq [zid (export/get-zids-for-uid darwin user-id)]
+          (let [zinvite (export/get-zinvite-from-zid darwin zid)]
+            (log/info "Now working on conv:" zid zinvite)
+            (export/export-conversation darwin
+                                 (assoc options
+                                   :zid zid
+                                   :zip-stream zip
+                                   :writer writer
+                                   :entry-point (str (export/zipfile-basename filename) "/" zinvite))))))
+      ;; Want to print the status of the conversation at each time t in at-times
+      at-times
+      (with-open [file (io/output-stream filename)
+                  zip  (ZipOutputStream. file)
+                  writer (io/writer zip)]
+        (doseq [at-time at-times]
+            (log/info "Now working on conv:" (:zid options) (:zinvite options))
+            (export/export-conversation darwin
+                                 (assoc options
+                                   :at-time at-time
+                                   :zip-stream zip
+                                   :writer writer
+                                   :entry-point (str (export/zipfile-basename filename) "/" at-time)))))
+      :else
+      (export/export-conversation darwin options))
+    (utils/exit 0 "Export complete")))
 
 
 (defn -main [& args]
-  (let [{:keys [arguments options errors summary]} (cli/parse-opts args cli-options)]
-    (log/info "Runner main function executed")
+  (log/info "Runner main function executed")
+  ;; default to poller subcommand
+  (let [subcommand (or (first args) "poller")
+        parser-spec (if (= subcommand "export") export-cli-options cli-options)
+        {:keys [arguments options errors summary]} (cli/parse-opts args parser-spec)]
     (cond
       ;; Help message
       (:help options)
@@ -141,19 +206,23 @@
       ;; Error in parsing (this should really catch the below condition as well
       (:errors options)
       (utils/exit 1 (str "Found the following errors:" \newline (:errors options)))
-      ;; Example:
-      ;;; Specifically catch the first argument here needing to be
-      ;(nil? (first arguments))
-      ;(utils/exit 1 "Must specify a subcommand!")
+      ;; otherwise, run the thing
       :else
-      ;; For now, we'll set the default to be the "poller"
-      (let [subcommand (or (first arguments) "poller")
-            system-map-generator (subcommands subcommand)
-            _ (log/info "Running subcommand:" subcommand)
-            system (system/create-and-run-system! system-map-generator options)]
-        (loop []
-          (Thread/sleep 1000)
-          (recur))))))
+      (let [system-map-generator (subcommands subcommand)
+            sys-options (if (#{"export"} subcommand)
+                          ;; pretty much always want prod here, regardless of env variable; overrideable?
+                          {:math-env :prod :export {:temp-dir "."}}
+                          options)
+            system (system/create-and-run-system! system-map-generator sys-options)]
+        (case subcommand
+          "update-all"
+          (update-all-convs system)
+          "export"
+          (run-export system options)
+          ;; Otherwise, default to keeping the main thread spinning while the system runs
+          (loop []
+            (Thread/sleep 1000)
+            (recur)))))))
 
 
 (comment

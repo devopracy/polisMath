@@ -1,4 +1,4 @@
-;; Copyright (C) 2012-present, Polis Technology Inc. This program is free software: you can redistribute it and/or  modify it under the terms of the GNU Affero General Public License, version 3, as published by the Free Software Foundation. This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public License for more details. You should have received a copy of the GNU Affero General Public License along with this program.  If not, see <http://www.gnu.org/licenses/>.
+;; Copyright (C) 2012-present, The Authors. This program is free software: you can redistribute it and/or  modify it under the terms of the GNU Affero General Public License, version 3, as published by the Free Software Foundation. This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public License for more details. You should have received a copy of the GNU Affero General Public License along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 (ns polismath.meta.microscope
   (:require [polismath.conv-man :as cm]
@@ -9,7 +9,7 @@
             [polismath.utils :as utils]
             [clojure.tools.trace :as tr]
             [clojure.tools.logging :as log]
-            [clojure.newtools.cli :refer [parse-opts]]
+            [clojure.tools.cli :refer [parse-opts]]
             [com.stuartsierra.component :as component]
             [plumbing.core :as pc]
             [korma.core :as ko]
@@ -33,12 +33,7 @@
   (let [zid        (or zid (postgres/get-zid-from-zinvite (:postgres system) zinvite))
         new-votes  (db/conv-poll postgres zid 0)]
     (log/info "Running a recompute on zid:" zid "(zinvite:" zinvite ")")
-    (cm/queue-message-batch! conversation-manager :votes zid new-votes)
-    (cm/add-listener!
-      conversation-manager
-      :complete-watch
-      (fn [new-conv]
-        (log/info "Done recomputing conv")))))
+    (cm/queue-message-batch! conversation-manager :votes zid new-votes)))
 
 (comment
   (require '[polismath.runner :as runner :refer [system]])

@@ -1,4 +1,4 @@
-;; Copyright (C) 2012-present, Polis Technology Inc. This program is free software: you can redistribute it and/or  modify it under the terms of the GNU Affero General Public License, version 3, as published by the Free Software Foundation. This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public License for more details. You should have received a copy of the GNU Affero General Public License along with this program.  If not, see <http://www.gnu.org/licenses/>.
+;; Copyright (C) 2012-present, The Authors. This program is free software: you can redistribute it and/or  modify it under the terms of the GNU Affero General Public License, version 3, as published by the Free Software Foundation. This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public License for more details. You should have received a copy of the GNU Affero General Public License along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 (ns polismath.darwin.core
   "The darwin.core namespace wraps the more pure (+ writing files/zips) code in darwin.export. Deals with parsing the
@@ -110,9 +110,9 @@
 
 (defn generate-filename
   "Generates a filename based on request-params"
-  [{:as request-params :keys [zinvite at-date format]}]
+  [{:as request-params :keys [zinvite at-time format]}]
   {:pre [zinvite format]}
-  (let [last-updated (or at-date (System/currentTimeMillis))
+  (let [last-updated (or at-time (System/currentTimeMillis))
         ext (case format :excel "xlsx" :csv "zip")
         filename (str "polis-export-" zinvite "-" last-updated "." ext)]
     filename))
@@ -140,7 +140,7 @@
     (assert (and x (< 0 x) (>= 29000 x)) "Invalid timout value")
     x))
 
-(def parsers {:at-date ->long
+(def parsers {:at-time ->long
               :format  keyword
               :timeout parse-and-validate-timeout})
 

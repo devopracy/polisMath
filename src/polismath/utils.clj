@@ -1,4 +1,4 @@
-;; Copyright (C) 2012-present, Polis Technology Inc. This program is free software: you can redistribute it and/or  modify it under the terms of the GNU Affero General Public License, version 3, as published by the Free Software Foundation. This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public License for more details. You should have received a copy of the GNU Affero General Public License along with this program.  If not, see <http://www.gnu.org/licenses/>.
+;; Copyright (C) 2012-present, The Authors. This program is free software: you can redistribute it and/or  modify it under the terms of the GNU Affero General Public License, version 3, as published by the Free Software Foundation. This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public License for more details. You should have received a copy of the GNU Affero General Public License along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 (ns polismath.utils
   (:use clojure.core.matrix)
@@ -152,13 +152,6 @@
           (fn [[k v]] (ks k))
           m))))
 
-
-(defn use-debuggers
-  "Handy debugging utility for loading in debugging namespaces - doesn't really always work. XXX - maybe
-  use Vinyasa?"
-  []
-  ;(require '[alex-and-georges.debug-repl :as dr])
-  (require '[clojure.tools.trace :as tr]))
 
 (defn clst-trace
   ([clsts] (clst-trace "" clsts))

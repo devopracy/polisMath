@@ -1,11 +1,9 @@
-;; Copyright (C) 2012-present, Polis Technology Inc. This program is free software: you can redistribute it and/or  modify it under the terms of the GNU Affero General Public License, version 3, as published by the Free Software Foundation. This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public License for more details. You should have received a copy of the GNU Affero General Public License along with this program.  If not, see <http://www.gnu.org/licenses/>.
+;; Copyright (C) 2012-present, The Authors. This program is free software: you can redistribute it and/or  modify it under the terms of the GNU Affero General Public License, version 3, as published by the Free Software Foundation. This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public License for more details. You should have received a copy of the GNU Affero General Public License along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 (ns polismath.darwin.export
   (:require [taoensso.timbre.profiling :as profiling
              :refer (pspy pspy* profile defnp p p*)]
             [clojure.java.io :as io]
-            [korma.core :as ko]
-            [korma.db :as kdb]
             [polismath.components.postgres :as db]
     ;; Probably should move the function we need out, since this should be meta only XXX
             [polismath.meta.microscope :as micro]
@@ -18,7 +16,7 @@
             [clj-time.core :as t]
             [clj-time.coerce :as co]
     ;; Think I'm going to use the second one here, since it's simpler (less mutable)
-            [dk.ative.docjure.spreadsheet :as spreadsheet]
+            ;[dk.ative.docjure.spreadsheet :as spreadsheet]
             [clj-excel.core :as excel]
             [semantic-csv.core :as scsv]
             [clojure-csv.core :as csv]
@@ -26,7 +24,7 @@
             [clojure.core.matrix :as mat]
             [clojure.tools.trace :as tr]
             [taoensso.timbre :as log]
-            [clojure.newtools.cli :refer [parse-opts]]
+            [clojure.tools.cli :refer [parse-opts]]
             [polismath.components.postgres :as postgres]
             [polismath.conv-man :as conv-man]
             [plumbing.core :as plmb])
@@ -57,8 +55,13 @@
 ;; cid, author, aggrees, disagrees, mod, text
 
 
+(defn datetime [timestamp]
+  (str (java.util.Date. timestamp)))
+
+
 (defn full-path [darwin filename]
-  (str (or (-> darwin :config :export :temp-dir) "/tmp/")
+  (str (or (-> darwin :config :export :temp-dir) "/tmp")
+       "/"
        filename))
 
 
@@ -70,77 +73,88 @@
 (defn get-zids-for-uid
   [darwin uid]
   (map :zid
-    (kdb/with-db (db-spec darwin)
-      (ko/select "conversations"
-        (ko/fields :zid)
-        (ko/where {:owner uid})))))
-
+    (db/query (:postgres darwin)
+              {:select [:*]
+               :from [:conversations]
+               :where [:= :owner uid]})))
 
 
 (defn get-zinvite-from-zid
   [darwin zid]
   (->
-    (kdb/with-db (db-spec darwin)
-      (ko/select "zinvites"
-        (ko/fields :zid :zinvite)
-        (ko/where {:zid zid})))
+    (db/query (:postgres darwin)
+              {:select [:zid :zinvite]
+               :from [:zinvites]
+               :where [:= :zid zid]})
     first
     :zinvite))
 
 
 (defn get-conversation-votes*
   ([darwin zid]
-   (kdb/with-db (db-spec darwin)
-     (ko/select db/votes
-       (ko/where {:zid zid})
-       (ko/order [:zid :tid :pid :created] :asc))))
+   (db/query (:postgres darwin)
+             {:select [:*]
+              :from [:votes]
+              :where [:= :zid zid]
+              :order-by [:zid :tid :pid :created]}))
   ([darwin zid final-vote-timestamp]
-   (kdb/with-db (db-spec darwin)
-     (ko/select db/votes
-       (ko/where {:zid zid :created [<= final-vote-timestamp]})
-       ; ordering by tid is important, since we rely on this ordering to determine the index within the comps, which needs to correspond to the tid
-       (ko/order [:zid :tid :pid :created] :asc)))))
+   (db/query (:postgres darwin)
+             {:select [:*]
+              :from [:votes]
+              :where [:and [:= :zid zid]
+                           [:<= :created final-vote-timestamp]]
+              :order-by [:zid :tid :pid :created]})))
 
 (defn get-conversation-votes
   [darwin & args]
-  ;; Flip the signs on the votes XXX (remove when we switch)
-  (map #(update-in % [:vote] (partial * -1))
-       (apply get-conversation-votes* darwin args)))
+  (->> (apply get-conversation-votes* darwin args)
+       ;; Flip the signs on the votes XXX (remove when we switch)
+       (map #(update-in % [:vote] (partial * -1)))
+       (map #(assoc % :datetime (datetime (:created %))))))
+
 
 (defn get-conversation-data
   "Return a map with :topic and :description keys"
   [darwin zid]
   (->
-    (kdb/with-db (db-spec darwin)
-      (ko/select "conversations"
-        (ko/fields :zid :topic :description :created)
-        (ko/where {:zid zid})))
+    (db/query (:postgres darwin)
+              {:select [:zid :topic :description :created]
+               :from [:conversations]
+               :where [:= :zid zid]})
     first))
 
-(defn get-participation-data
+(defn get-participation-data*
   ([darwin zid]
-   (kdb/with-db (db-spec darwin)
-     (ko/select "participants"
-       (ko/fields :zid :pid :vote_count :created)
-       (ko/where {:zid zid}))))
+   (db/query (:postgres darwin)
+             {:select [:zid :pid :vote_count :created]
+              :from [:participants]
+              :where [:= :zid zid]}))
   ([darwin zid final-timestamp]
-   (kdb/with-db (db-spec darwin)
-     (ko/select "participants"
-       (ko/fields :zid :pid :vote_count :created)
-       (ko/where {:zid zid :created [<= final-timestamp]})))))
+   (db/query (:postgres darwin)
+             {:select [:zid :pid :vote_count :created]
+              :from [:participants]
+              :where [:and [:= :zid zid]
+                           [:<= :created final-timestamp]]})))
+
+(defn get-participation-data
+  [& args]
+  (->> (apply get-participation-data* args)
+       (map (fn [data]
+              (assoc data :datetime (datetime (:created data)))))))
 
 
 (defn get-comments-data
   ([darwin zid]
-   (kdb/with-db (db-spec darwin)
-     (ko/select "comments"
-       (ko/fields :zid :tid :pid :txt :mod :created)
-       (ko/where {:zid zid}))))
+   (db/query (:postgres darwin)
+             {:select [:zid :tid :pid :txt :mod :created]
+              :from [:comments]
+              :where [:= :zid zid]}))
   ([darwin zid final-timestamp]
-   (kdb/with-db (db-spec darwin)
-     (ko/select "comments"
-       (ko/fields :zid :tid :pid :txt :mod :created)
-       (ko/where {:zid zid :created [<= final-timestamp]})))))
+   (db/query (:postgres darwin)
+             {:select [:zid :tid :pid :txt :mod :created]
+              :from [:comments]
+              :where [:and [:= :zid zid]
+                           [:<= :created final-timestamp]]})))
 
 
 
@@ -275,27 +289,50 @@
                      members))))
     group-clusters))
 
+
+(defn participant-xids
+  [darwin conv]
+  (->>
+    (db/query
+      (:postgres darwin)
+      {:select [:participants.pid :xids.uid :xid]
+       :from [:xids]
+       :join [:conversations [:= :conversations.owner :xids.owner]
+              :participants [:= :participants.uid :xids.uid]]
+       :where [:and
+               [:= :conversations.zid (:zid conv)]
+               [:= :participants.zid (:zid conv)]]})
+    (map (fn [{:keys [pid xid]}]
+           [pid xid]))
+    (into {})))
+
+
 ;; participant-id, group-id, n-votes, n-comments, n-aggre, n-disagree, <comments...>
 (defn participants-votes-table
-  [conv votes comments]
+  [darwin conv votes comments {:as kw-args :keys [include-xid]}]
   (let [mat (reconstruct-vote-matrix votes)
-        flattened-clusters (flatten-clusters (:group-clusters conv) (:base-clusters conv))]
+        flattened-clusters (flatten-clusters (:group-clusters conv) (:base-clusters conv))
+        xids (participant-xids darwin conv)]
     (concat
       ;; The header
-      [(into ["participant" "group-id" "n-comments" "n-votes" "n-agree" "n-disagree"] (nm/colnames mat))]
+      [(concat ["participant"]
+               (when include-xid ["xid"])
+               ["group-id" "n-comments" "n-votes" "n-agree" "n-disagree"]
+               (nm/colnames mat))]
       ;; The rest of the data
       (map
         (fn [ptpt row]
-          (into [ptpt
-                 (:id (ffilter #(some #{ptpt} (:members %)) flattened-clusters))
-                 (count (filter #(= (:pid %) ptpt) comments))
-                 (count (remove nil? row))
-                 ;; XXX God damn aggree vs disagree...
-                 ;; Fixed this upstream, for now; so should be good to go once we've fixed it at the source. But
-                 ;; keep an eye on it for now... XXX
-                 (count (filter #{1} row))
-                 (count (filter #{-1} row))]
-                row))
+          (concat [ptpt]
+                  (when include-xid [(get xids ptpt)])
+                  [(:id (ffilter #(some #{ptpt} (:members %)) flattened-clusters))
+                   (count (filter #(= (:pid %) ptpt) comments))
+                   (count (remove nil? row))
+                   ;; XXX God damn aggree vs disagree...
+                   ;; Fixed this upstream, for now; so should be good to go once we've fixed it at the source. But
+                   ;; keep an eye on it for now... XXX
+                   (count (filter #{1} row))
+                   (count (filter #{-1} row))]
+                  row))
         (nm/rownames mat)
         (.matrix mat)))))
 
@@ -320,7 +357,10 @@
             ;; keep an eye on it for now... XXX
             aggrees (filter #(= 1 (:vote %)) comment-votes)
             disagrees (filter #(= -1 (:vote %)) comment-votes)]
-        (assoc comment-data :aggrees (count aggrees) :disagrees (count disagrees))))
+        (assoc comment-data
+               :aggrees (count aggrees)
+               :disagrees (count disagrees)
+               :datetime (datetime (:created comment-data)))))
     comments))
 
 
@@ -413,14 +453,16 @@
       (update-in [:stats-history]
                  (partial scsv/vectorize {:header [:n-votes :n-comments :n-visitors :n-voters :n-commenters]}))
       (update-in [:votes]
-                 (partial scsv/vectorize {:header [:created :tid :pid :vote]
+                 (partial scsv/vectorize {:header [:created :datetime :tid :pid :vote]
                                           :format-header {:created   "timestamp"
+                                                          :datetime  "datetime"
                                                           :tid       "comment-id"
                                                           :pid       "voter-id"
                                                           :vote      "vote"}}))
       (update-in [:comments]
-                 (partial scsv/vectorize {:header [:created :tid :pid :aggrees :disagrees :mod :txt]
+                 (partial scsv/vectorize {:header [:created :datetime :tid :pid :aggrees :disagrees :mod :txt]
                                           :format-header {:created   "timestamp"
+                                                          :datetime  "datetime"
                                                           :tid       "comment-id"
                                                           :pid       "author-id"
                                                           :aggrees   "agrees"
@@ -441,7 +483,7 @@
 
 (defn move-to-zip-stream
   [zip-stream input-filename entry-point]
-  (with-open [input  (io/input-stream input-filename)]
+  (with-open [input (io/input-stream input-filename)]
     (with-entry zip-stream entry-point
       (io/copy input zip-stream))))
 
@@ -464,22 +506,22 @@
 (defn save-to-csv-zip
   ([filename data]
    (with-open [file (io/output-stream filename)
-               zip  (ZipOutputStream. file)]
-     (save-to-csv-zip zip (zipfile-basename filename) data)))
-  ([zip-stream entry-point-base data]
-   (with-open [wrt  (io/writer zip-stream)]
-     (binding [*out* wrt]
-       (doto zip-stream
-         (with-entry (str entry-point-base "/summary.csv")
-           (print-csv (:summary data)))
-         (with-entry (str entry-point-base "/stats-history.csv")
-           (print-csv (:stats-history data)))
-         (with-entry (str entry-point-base "/comments.csv")
-           (print-csv (:comments data)))
-         (with-entry (str entry-point-base "/votes.csv")
-           (print-csv (:votes data)))
-         (with-entry (str entry-point-base "/participants-votes.csv")
-           (print-csv (:participants-votes data))))))))
+               zip  (ZipOutputStream. file)
+               writer (io/writer zip)]
+     (save-to-csv-zip zip writer (zipfile-basename filename) data)))
+  ([zip-stream writer entry-point-base data]
+   (binding [*out* writer]
+     (doto zip-stream
+       (with-entry (str entry-point-base "/summary.csv")
+         (print-csv (:summary data)))
+       (with-entry (str entry-point-base "/stats-history.csv")
+         (print-csv (:stats-history data)))
+       (with-entry (str entry-point-base "/comments.csv")
+         (print-csv (:comments data)))
+       (with-entry (str entry-point-base "/votes.csv")
+         (print-csv (:votes data)))
+       (with-entry (str entry-point-base "/participants-votes.csv")
+         (print-csv (:participants-votes data)))))))
 
 
 (defn save-to-excel
@@ -532,22 +574,22 @@
     {:votes votes
      :summary (summary-data darwin conv votes comments participants)
      :stats-history (stats-history votes participants comments)
-     :participants-votes (participants-votes-table conv votes comments)
+     :participants-votes (participants-votes-table darwin conv votes comments kw-args)
      :comments comments}))
 
-(defn get-export-data-at-date
-  [darwin {:keys [zid zinvite env-overrides at-date] :as kw-args}]
+(defn get-export-data-at-time
+  [darwin {:keys [zid zinvite env-overrides at-time] :as kw-args}]
   (let [zid (or zid (postgres/get-zid-from-zinvite (:postgres darwin) zinvite))
-        votes (get-conversation-votes darwin zid at-date)
+        votes (get-conversation-votes darwin zid at-time)
         conv (assoc (conv/new-conv) :zid zid)
         conv (conv/conv-update conv votes)
-        _ (println "Done with conv update")
-        comments (enriched-comments-data (get-comments-data darwin zid at-date) votes)
-        participants (get-participation-data darwin zid at-date)]
+        _ (log/info "Done with conv update")
+        comments (enriched-comments-data (get-comments-data darwin zid at-time) votes)
+        participants (get-participation-data darwin zid at-time)]
     {:votes votes
-     :summary (assoc (summary-data darwin conv votes comments participants) :at-date at-date)
+     :summary (assoc (summary-data darwin conv votes comments participants) :at-time at-time)
      :stats-history (stats-history votes participants comments)
-     :participants-votes (participants-votes-table conv votes comments)
+     :participants-votes (participants-votes-table darwin conv votes comments kw-args)
      :comments comments}))
 
 
@@ -558,16 +600,16 @@
   specified, which can be used for biulding up items in a zip file. This is used in export/-main to export all
   convs for a given uid, for example."
   ;; Don't forget env-overrides {:math-env "prod"}; should clean up with system
-  [darwin {:keys [zid zinvite format filename zip-stream entry-point env-overrides at-date] :as kw-args}]
+  [darwin {:keys [zid zinvite format filename zip-stream writer entry-point env-overrides at-time include-xid] :as kw-args}]
   (log/info "Exporting data for zid =" zid ", zinvite =" zinvite)
-  (let [export-data (if at-date
-                      (get-export-data-at-date darwin kw-args)
+  (let [export-data (if at-time
+                      (get-export-data-at-time darwin kw-args)
                       (get-export-data darwin kw-args))
         [formatter saver] (case format :excel [excel-format save-to-excel] :csv [csv-format save-to-csv-zip])
         formatted (formatter export-data)]
     (if zip-stream
       (if (-> export-data :summary :n-voters (> 0))
-        (saver zip-stream entry-point formatted)
+        (saver zip-stream writer entry-point formatted)
         (log/debug "Skipping conv" zid zinvite ", since no votes"))
       (saver (full-path darwin filename) formatted)))
   (log/info "Finished exporting data for zid =" zid ", zinvite =" zinvite))
@@ -580,7 +622,9 @@
 (comment
   (require '[polismath.runner :as runner])
   (def darwin (:darwin runner/system))
-  (export-conversation {;;:zid 310273
+  runner/system
+  (export-conversation runner/system
+                       {;;:zid 310273
                         :zinvite "7scufp"
                         :format :csv
                         :filename "cljwebdev.zip"
